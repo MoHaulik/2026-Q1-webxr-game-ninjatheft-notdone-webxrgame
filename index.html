@@ -1,0 +1,1130 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <title>SHINOBI AR: SHADOW STRIKE</title>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+
+  <!-- Import Map for Three.js -->
+  <script type="importmap">
+  {
+    "imports": {
+      "three": "https://cdn.jsdelivr.net/npm/three@0.150.1/build/three.module.js"
+    }
+  }
+  </script>
+
+  <style>
+    :root {
+      --blood-red: #d32f2f;
+      --ink-black: #111111;
+      --parchment: #f4e8d0;
+      --gold: #ffc107;
+    }
+    
+    body { 
+      margin: 0; 
+      overflow: hidden;
+      font-family: 'Georgia', 'Times New Roman', serif;
+      background-color: var(--ink-black);
+      user-select: none;
+      -webkit-user-select: none;
+    }
+    
+    /* --- Main Menu UI (Ancient Ink Aesthetic) --- */
+    #overlay {
+      position: absolute; top: 0; left: 0; width: 100%; height: 100%;
+      z-index: 10; display: flex; flex-direction: column;
+      align-items: center; justify-content: center;
+      background: radial-gradient(circle at center, rgba(30,15,15,0.95) 0%, rgba(5,5,5,1) 100%);
+      color: var(--parchment); text-align: center;
+      transition: opacity 0.5s ease;
+    }
+    
+    .title-container { margin-bottom: 3rem; animation: float 4s ease-in-out infinite; }
+
+    h1 {
+      font-size: 5rem; margin: 0; font-weight: 900;
+      letter-spacing: 12px; text-transform: uppercase;
+      color: var(--parchment);
+      text-shadow: 4px 4px 0px var(--blood-red);
+      line-height: 1; border-bottom: 4px solid var(--blood-red); padding-bottom: 10px;
+    }
+    
+    .subtitle {
+      font-size: 1.5rem; color: var(--gold); letter-spacing: 8px; margin-top: 1rem; font-weight: bold;
+    }
+
+    .btn {
+      font-family: 'Georgia', serif; font-size: 1.5rem; font-weight: bold; padding: 15px 50px;
+      background: var(--ink-black); color: var(--parchment);
+      border: 4px solid var(--blood-red); cursor: pointer;
+      box-shadow: 8px 8px 0px var(--blood-red); transition: all 0.1s ease; text-transform: uppercase;
+    }
+
+    .btn:hover { transform: translate(4px, 4px); box-shadow: 4px 4px 0px var(--blood-red); background: var(--blood-red); color: var(--ink-black); }
+    .btn:active { transform: translate(8px, 8px); box-shadow: 0px 0px 0px var(--blood-red); }
+    
+    .webxr-hidden { opacity: 0; pointer-events: none; }
+    
+    @keyframes float {
+      0% { transform: translateY(0px); }
+      50% { transform: translateY(-8px); }
+      100% { transform: translateY(0px); }
+    }
+  </style>
+</head>
+<body>
+  <div id="overlay">
+    <div class="title-container">
+      <h1>SHINOBI</h1>
+      <div class="subtitle">LOTUS DEFENDER</div>
+    </div>
+    <button id="start-button" class="btn">Enter The Dojo</button>
+  </div>
+
+  <script type="module">
+    import * as THREE from 'three';
+
+    // ==========================================
+    // SYSTEM CONFIGURATION & GAME FEEL
+    // ==========================================
+    const CONFIG = {
+      ARENA: { radius: 3.0, artifactPos: new THREE.Vector3(0, 1.0, -1.5) },
+      SHURIKEN: { size: 0.08, maxSpeed: 25, gravity: -4.0, throwMultiplier: 4.5, spin: 35 },
+      SCORING: { base: 100, comboMultiplier: 0.5 },
+      GAME_FEEL: { hitStopDuration: 0.06, cameraShake: 0.05 },
+      TUTORIAL_HITS_REQUIRED: 3
+    };
+
+    const GAME_STATES = { TUTORIAL: 0, TRANSITION: 1, DEFEND: 2, GAMEOVER: 3 };
+
+    // ==========================================
+    // GLOBAL ARCHITECTURE
+    // ==========================================
+    let camera, scene, renderer, clock;
+    let controllers = [];
+    let entities = []; 
+    
+    let gameState = GAME_STATES.TUTORIAL;
+    let score = 0, combo = 0, tutorialHits = 0;
+    let wave = 1, waveTimer = 0, ninjasToSpawn = 0, activeNinjas = 0;
+    let hitStopTimer = 0;
+    let audioCtx;
+    let artifactEntity = null;
+    let envGroup = new THREE.Group();
+    
+    let mats = {};
+    
+    // In-World UI Elements
+    let uiCanvas, uiCtx, uiTexture, uiMesh;
+    let cameraHUDGroup = new THREE.Group();
+    let centerMessageSprite = null;
+
+    init();
+
+    // ==========================================
+    // ENGINE INITIALIZATION
+    // ==========================================
+    function init() {
+      scene = new THREE.Scene();
+      scene.add(envGroup);
+      
+      camera = new THREE.PerspectiveCamera(70, window.innerWidth / window.innerHeight, 0.01, 50);
+      scene.add(camera); // Add camera to scene to allow parenting HUD elements
+      camera.add(cameraHUDGroup); // Attach head-locked HUD group
+      cameraHUDGroup.position.set(0, 0, -1.5); // Place it 1.5m in front of the user's face
+      
+      clock = new THREE.Clock();
+
+      renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+      renderer.setSize(window.innerWidth, window.innerHeight);
+      renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+      renderer.xr.enabled = true;
+      renderer.setClearColor(0x000000, 0); 
+      document.body.appendChild(renderer.domElement);
+
+      buildLighting();
+      buildMaterials();
+      buildInWorldScoreboard();
+
+      document.getElementById('start-button').addEventListener('click', startARSession);
+      window.addEventListener('resize', onWindowResize);
+    }
+
+    function buildLighting() {
+      scene.add(new THREE.AmbientLight(0x444455, 1.5));
+      const sunLight = new THREE.DirectionalLight(0xffeedd, 2.0);
+      sunLight.position.set(5, 10, 2);
+      scene.add(sunLight);
+    }
+
+    function buildMaterials() {
+      // Cartoon Network 2001 Style requires FLAT shading and stark colors.
+      // We use MeshStandardMaterial with flatShading: true, low roughness.
+      
+      mats.shuriken = new THREE.MeshStandardMaterial({ color: 0x888888, metalness: 0.5, roughness: 0.5, flatShading: true });
+      
+      mats.wood = new THREE.MeshStandardMaterial({ color: 0x5c4033, flatShading: true });
+      mats.straw = new THREE.MeshStandardMaterial({ color: 0xd4c48a, flatShading: true });
+      
+      // Samurai Jack Ninja Palette (Stark black, bright red accents, stark white)
+      mats.ninjaSuit = new THREE.MeshStandardMaterial({ color: 0x111115, flatShading: true, roughness: 1 });
+      mats.ninjaBelt = new THREE.MeshStandardMaterial({ color: 0xd32f2f, flatShading: true });
+      mats.ninjaSkin = new THREE.MeshStandardMaterial({ color: 0xffcc99, flatShading: true });
+      mats.ninjaEye = new THREE.MeshBasicMaterial({ color: 0xffffff }); // Unlit white for glowing angry eyes
+      
+      mats.stone = new THREE.MeshStandardMaterial({ color: 0x666666, flatShading: true });
+      
+      // The Golden Lotus
+      mats.gold = new THREE.MeshStandardMaterial({ color: 0xffd700, metalness: 0.8, roughness: 0.2, flatShading: true });
+      mats.goldGlow = new THREE.MeshBasicMaterial({ color: 0xffaa00 });
+      
+      mats.smoke = new THREE.MeshBasicMaterial({ color: 0xe0e0e0, transparent: true, opacity: 0.9 });
+      mats.windSlash = new THREE.MeshBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.8, side: THREE.DoubleSide });
+    }
+
+    // ==========================================
+    // IN-WORLD UI GENERATION (Replacing DOM HUD)
+    // ==========================================
+    function buildInWorldScoreboard() {
+      // Create a canvas texture for dynamic text updating
+      uiCanvas = document.createElement('canvas');
+      uiCanvas.width = 512; uiCanvas.height = 256;
+      uiCtx = uiCanvas.getContext('2d');
+      uiTexture = new THREE.CanvasTexture(uiCanvas);
+      uiTexture.minFilter = THREE.LinearFilter;
+      
+      // Paint initial state
+      updateInWorldUI();
+
+      // Create a physical "Scroll" floating in the world
+      const boardGroup = new THREE.Group();
+      
+      // Scroll background (Parchment)
+      const bgGeo = new THREE.PlaneGeometry(1.2, 0.6);
+      const bgMat = new THREE.MeshBasicMaterial({ map: uiTexture, transparent: true });
+      uiMesh = new THREE.Mesh(bgGeo, bgMat);
+      boardGroup.add(uiMesh);
+
+      // Place it right above the pedestal location
+      boardGroup.position.set(CONFIG.ARENA.artifactPos.x, CONFIG.ARENA.artifactPos.y + 1.2, CONFIG.ARENA.artifactPos.z);
+      
+      // Make it always face the origin (user)
+      boardGroup.lookAt(0, boardGroup.position.y, 0);
+      scene.add(boardGroup);
+    }
+
+    function updateInWorldUI() {
+      uiCtx.clearRect(0, 0, uiCanvas.width, uiCanvas.height);
+      
+      // Scroll Background
+      uiCtx.fillStyle = 'rgba(244, 232, 208, 0.85)'; // Parchment
+      uiCtx.fillRect(0, 0, 512, 256);
+      uiCtx.strokeStyle = '#d32f2f'; // Blood red border
+      uiCtx.lineWidth = 8;
+      uiCtx.strokeRect(4, 4, 504, 248);
+
+      // Honor (Score)
+      uiCtx.textAlign = 'left';
+      uiCtx.fillStyle = '#111';
+      uiCtx.font = 'bold 24px Georgia';
+      uiCtx.fillText('HONOR', 30, 50);
+      
+      uiCtx.font = 'bold 60px Georgia';
+      uiCtx.fillText(score.toString().padStart(6, '0'), 30, 110);
+
+      // Assault (Wave)
+      uiCtx.textAlign = 'right';
+      uiCtx.font = 'bold 24px Georgia';
+      uiCtx.fillText('ASSAULT', 482, 50);
+      
+      uiCtx.fillStyle = '#d32f2f';
+      uiCtx.font = 'bold 50px Georgia';
+      let waveStr = gameState === GAME_STATES.TUTORIAL ? 'TRAINING' : `${wave}`;
+      uiCtx.fillText(waveStr, 482, 110);
+
+      // Combo
+      if (combo > 1) {
+        uiCtx.textAlign = 'center';
+        uiCtx.fillStyle = '#d32f2f';
+        uiCtx.font = 'bold 45px Georgia';
+        uiCtx.fillText(`${combo}x STRIKE`, 256, 200);
+      }
+
+      if (uiTexture) uiTexture.needsUpdate = true;
+    }
+
+    function showHeadsetHUDMessage(text, isError = false) {
+      // Remove old message if exists
+      if (centerMessageSprite) {
+        cameraHUDGroup.remove(centerMessageSprite);
+        centerMessageSprite.material.dispose();
+        centerMessageSprite.geometry.dispose();
+      }
+
+      const canvas = document.createElement('canvas');
+      canvas.width = 1024; canvas.height = 256;
+      const ctx = canvas.getContext('2d');
+      
+      ctx.textAlign = "center";
+      ctx.font = "900 80px Arial"; // Bold modern font for clarity in VR
+      
+      ctx.fillStyle = isError ? '#d32f2f' : '#ffc107';
+      ctx.shadowColor = '#000'; ctx.shadowBlur = 15; ctx.shadowOffsetX = 4; ctx.shadowOffsetY = 4;
+      ctx.fillText(text, 512, 140);
+      ctx.lineWidth = 3; ctx.strokeStyle = '#000'; ctx.strokeText(text, 512, 140);
+
+      const tex = new THREE.CanvasTexture(canvas);
+      const mat = new THREE.SpriteMaterial({ map: tex, transparent: true, depthTest: false }); // Render on top
+      centerMessageSprite = new THREE.Sprite(mat);
+      centerMessageSprite.scale.set(1.5, 0.375, 1);
+      
+      cameraHUDGroup.add(centerMessageSprite);
+
+      // Animate and destroy
+      let life = 0;
+      entities.push({
+        type: 'ui_anim', life: 2.5,
+        update: function(dt) {
+          this.life -= dt;
+          if(this.life > 2.0) centerMessageSprite.scale.setScalar(1.5 + (this.life-2.0)*2); // pop in
+          else if(this.life < 0.5) centerMessageSprite.material.opacity = this.life / 0.5; // fade out
+          else centerMessageSprite.scale.set(1.5, 0.375, 1);
+          
+          if(this.life <= 0) {
+            cameraHUDGroup.remove(centerMessageSprite);
+            this.dead = true;
+          }
+        }
+      });
+    }
+
+    // ==========================================
+    // WEBXR & SESSION MANAGEMENT
+    // ==========================================
+    async function startARSession() {
+      if (!navigator.xr) { alert('WebXR is not supported on this browser/device.'); return; }
+      try {
+        // Removed DOM overlay requirement for true native feel
+        const sessionInit = { requiredFeatures: ['local-floor'] };
+        const session = await navigator.xr.requestSession('immersive-ar', sessionInit);
+        onSessionStarted(session);
+      } catch (error) { 
+        alert('AR Initialization Failed. Ensure you are on a compatible VR/AR headset or mobile device.'); 
+      }
+    }
+
+    function onSessionStarted(session) {
+      document.getElementById('overlay').classList.add('webxr-hidden');
+      renderer.xr.setReferenceSpaceType('local-floor');
+      renderer.xr.setSession(session);
+      
+      setupControllers();
+      initAudio();
+      rebootGame();
+
+      renderer.setAnimationLoop(render);
+      session.addEventListener('end', onSessionEnd);
+    }
+
+    function onSessionEnd() {
+      document.getElementById('overlay').classList.remove('webxr-hidden');
+      renderer.setAnimationLoop(null);
+      clearEntities();
+    }
+
+    function onWindowResize() {
+      if (camera && renderer) {
+        camera.aspect = window.innerWidth / window.innerHeight;
+        camera.updateProjectionMatrix();
+        renderer.setSize(window.innerWidth, window.innerHeight);
+      }
+    }
+
+    // ==========================================
+    // CONTROLLER & THROW PHYSICS
+    // ==========================================
+    function setupControllers() {
+      for (let i = 0; i < 2; i++) {
+        const controller = renderer.xr.getController(i);
+        scene.add(controller);
+        controllers.push(controller);
+        controller.userData.history = [];
+        controller.addEventListener('selectstart', onSelectStart);
+        controller.addEventListener('selectend', onSelectEnd);
+      }
+    }
+
+    function onSelectStart(event) {
+      const controller = event.target;
+      if (controller.userData.holding) return;
+      
+      if (gameState === GAME_STATES.GAMEOVER) {
+        rebootGame(); // Click to restart mechanic built into controller!
+        return;
+      }
+
+      const dummy = createShurikenMesh();
+      controller.add(dummy);
+      controller.userData.holding = dummy;
+      triggerHaptics(controller, 0.2, 20);
+    }
+
+    function onSelectEnd(event) {
+      const controller = event.target;
+      const dummy = controller.userData.holding;
+      if (!dummy) return;
+
+      controller.remove(dummy);
+      controller.userData.holding = null;
+
+      const hist = controller.userData.history;
+      let velocity = new THREE.Vector3();
+      if (hist.length > 2) {
+        const first = hist[0]; const last = hist[hist.length - 1];
+        const dt = (last.time - first.time) / 1000;
+        if (dt > 0) velocity.subVectors(last.pos, first.pos).divideScalar(dt);
+      }
+
+      velocity.multiplyScalar(CONFIG.SHURIKEN.throwMultiplier);
+      const forward = new THREE.Vector3(0, 0, -1).applyQuaternion(controller.quaternion);
+      velocity.add(forward.multiplyScalar(5.0)); 
+
+      if (velocity.length() > CONFIG.SHURIKEN.maxSpeed) velocity.normalize().multiplyScalar(CONFIG.SHURIKEN.maxSpeed);
+
+      const worldPos = new THREE.Vector3(); const worldQuat = new THREE.Quaternion();
+      controller.getWorldPosition(worldPos); controller.getWorldQuaternion(worldQuat);
+
+      spawnShuriken(worldPos, worldQuat, velocity);
+      playSound('throw');
+      triggerHaptics(controller, 0.7, 40);
+    }
+
+    // ==========================================
+    // GAME PROGRESSION LOGIC
+    // ==========================================
+    function clearEntities() {
+      entities.forEach(e => { if(e.mesh) scene.remove(e.mesh); });
+      entities = [];
+      if(artifactEntity) { scene.remove(artifactEntity.mesh); artifactEntity = null; }
+    }
+
+    function rebootGame() {
+      clearEntities();
+      
+      score = 0; combo = 0; tutorialHits = 0; wave = 1;
+      gameState = GAME_STATES.TUTORIAL;
+      updateInWorldUI();
+      
+      showHeadsetHUDMessage("STRIKE THE POSTS");
+      
+      setTimeout(() => spawnTrainingPost(new THREE.Vector3(-1.2, 0, -2.0)), 1000);
+      setTimeout(() => spawnTrainingPost(new THREE.Vector3(1.2, 0, -2.0)), 2000);
+      setTimeout(() => spawnTrainingPost(new THREE.Vector3(0, 0, -2.5)), 3000);
+    }
+
+    function triggerPhaseDefend() {
+      gameState = GAME_STATES.TRANSITION;
+      showHeadsetHUDMessage("YOUR SKILLS ARE SHARP");
+      
+      entities.forEach(e => { if(e.type === 'target') e.destroy(); });
+
+      setTimeout(() => {
+        spawnPedestalAndArtifact();
+        showHeadsetHUDMessage("DEFEND THE GOLDEN LOTUS");
+      }, 2500);
+
+      setTimeout(() => {
+        gameState = GAME_STATES.DEFEND;
+        startWave(1);
+      }, 6500);
+    }
+
+    function startWave(w) {
+      wave = w;
+      updateInWorldUI();
+      ninjasToSpawn = 3 + (wave * 2);
+      activeNinjas = 0;
+      waveTimer = 0;
+      playSound('gong');
+    }
+
+    function triggerGameOver() {
+      if(gameState === GAME_STATES.GAMEOVER) return;
+      gameState = GAME_STATES.GAMEOVER;
+      
+      // Update the world board to show game over stats
+      uiCtx.fillStyle = 'rgba(0,0,0,0.8)'; uiCtx.fillRect(0,0,512,256);
+      uiCtx.fillStyle = '#d32f2f'; uiCtx.font = 'bold 60px Georgia'; uiCtx.textAlign = 'center';
+      uiCtx.fillText('DISHONOR', 256, 100);
+      uiCtx.fillStyle = '#f4e8d0'; uiCtx.font = 'bold 30px Georgia';
+      uiCtx.fillText(`FINAL HONOR: ${score}`, 256, 160);
+      uiCtx.fillText(`CLICK TRIGGER TO RESTART`, 256, 210);
+      if (uiTexture) uiTexture.needsUpdate = true;
+
+      showHeadsetHUDMessage("THE LOTUS IS LOST", true);
+      playSound('game_over');
+    }
+
+    // ==========================================
+    // ENTITIES: PROCEDURAL GENERATION & BEHAVIOR
+    // ==========================================
+    
+    // --- 1. SHURIKEN ---
+    function createShurikenMesh() {
+      const size = CONFIG.SHURIKEN.size;
+      const shape = new THREE.Shape();
+      // Sharp classic star
+      shape.moveTo(0, size); shape.lineTo(size * 0.2, size * 0.2); shape.lineTo(size, 0); shape.lineTo(size * 0.2, -size * 0.2);
+      shape.lineTo(0, -size); shape.lineTo(-size * 0.2, -size * 0.2); shape.lineTo(-size, 0); shape.lineTo(-size * 0.2, size * 0.2); shape.lineTo(0, size);
+      
+      const geo = new THREE.ExtrudeGeometry(shape, { depth: 0.005, bevelEnabled: false }); // No bevel for flat shading
+      geo.center();
+      
+      const mesh = new THREE.Mesh(geo, mats.shuriken);
+      const holeGeo = new THREE.CylinderGeometry(size*0.15, size*0.15, 0.02, 8);
+      holeGeo.rotateX(Math.PI/2);
+      const hole = new THREE.Mesh(holeGeo, new THREE.MeshBasicMaterial({color: 0x000000}));
+      mesh.add(hole);
+      return mesh;
+    }
+
+    function spawnShuriken(pos, quat, velocity) {
+      const mesh = createShurikenMesh();
+      mesh.position.copy(pos); mesh.quaternion.copy(quat);
+      scene.add(mesh);
+
+      entities.push({
+        type: 'shuriken', mesh: mesh, velocity: velocity, life: 2.5,
+        collider: new THREE.Sphere(mesh.position, CONFIG.SHURIKEN.size * 1.5), 
+        trailTimer: 0,
+        update: function(dt) {
+          this.velocity.y += CONFIG.SHURIKEN.gravity * dt;
+          this.mesh.position.addScaledVector(this.velocity, dt);
+          this.mesh.rotateZ(-CONFIG.SHURIKEN.spin * dt);
+          this.collider.center.copy(this.mesh.position);
+          
+          this.trailTimer += dt;
+          if(this.trailTimer > 0.03) { spawnWindTrail(this.mesh.position); this.trailTimer = 0; }
+
+          this.life -= dt;
+          if (this.life <= 0) this.destroy();
+        },
+        destroy: function() { this.dead = true; scene.remove(this.mesh); }
+      });
+    }
+
+    // --- 2. MAKIWARA TARGETS ---
+    function spawnTrainingPost(pos) {
+      const group = new THREE.Group();
+      group.position.copy(pos);
+      
+      const postGeo = new THREE.CylinderGeometry(0.08, 0.08, 1.2, 6);
+      const post = new THREE.Mesh(postGeo, mats.wood);
+      post.position.y = 0.6;
+      group.add(post);
+      
+      const wrapGeo = new THREE.CylinderGeometry(0.1, 0.1, 0.4, 8);
+      const wrap = new THREE.Mesh(wrapGeo, mats.straw);
+      wrap.position.y = 0.9;
+      group.add(wrap);
+      
+      group.scale.set(0.01, 0.01, 0.01);
+      scene.add(group);
+      
+      spawnSmokePoof(new THREE.Vector3(pos.x, 0.5, pos.z));
+
+      entities.push({
+        type: 'target', mesh: group, scaleProgress: 0, 
+        collider: new THREE.Sphere(new THREE.Vector3(pos.x, 0.9, pos.z), 0.25),
+        update: function(dt) {
+          if (this.scaleProgress < 1.0) {
+            this.scaleProgress += dt * 3;
+            const s = Math.min(1.0, this.scaleProgress);
+            // Snappy elastic pop-up
+            const scale = s === 1 ? 1 : 1 - Math.pow(2, -10 * s) * Math.sin((s * 10 - 0.75) * (2 * Math.PI) / 3);
+            this.mesh.scale.setScalar(scale);
+          }
+        },
+        destroy: function() { this.dead = true; scene.remove(this.mesh); }
+      });
+    }
+
+    // --- 3. THE GOLDEN LOTUS ---
+    function spawnPedestalAndArtifact() {
+      const pedGroup = new THREE.Group();
+      pedGroup.position.copy(CONFIG.ARENA.artifactPos);
+      pedGroup.position.y = 0; 
+      
+      const baseGeo = new THREE.CylinderGeometry(0.3, 0.4, 0.1, 8);
+      const base = new THREE.Mesh(baseGeo, mats.stone);
+      base.position.y = 0.05;
+      pedGroup.add(base);
+      
+      const pillarGeo = new THREE.CylinderGeometry(0.2, 0.2, 0.7, 8);
+      const pillar = new THREE.Mesh(pillarGeo, mats.stone);
+      pillar.position.y = 0.45;
+      pedGroup.add(pillar);
+      scene.add(pedGroup);
+
+      // Construct The Stylized Golden Lotus
+      const lotusGroup = new THREE.Group();
+      lotusGroup.position.copy(CONFIG.ARENA.artifactPos);
+      lotusGroup.position.y = 0.9;
+      
+      // Center Pod
+      const podGeo = new THREE.ConeGeometry(0.1, 0.2, 8);
+      const pod = new THREE.Mesh(podGeo, mats.gold);
+      pod.rotation.x = Math.PI; // point down
+      lotusGroup.add(pod);
+
+      // Sharp stylized petals
+      for(let i=0; i<8; i++) {
+        const petalGeo = new THREE.ConeGeometry(0.08, 0.3, 3);
+        const petal = new THREE.Mesh(petalGeo, mats.gold);
+        
+        // Arrange in circle and tilt outwards
+        const angle = (i / 8) * Math.PI * 2;
+        petal.position.x = Math.sin(angle) * 0.05;
+        petal.position.z = Math.cos(angle) * 0.05;
+        
+        // Look out and tilt up
+        petal.lookAt(Math.sin(angle)*2, -1, Math.cos(angle)*2);
+        
+        lotusGroup.add(petal);
+      }
+      
+      // Floating glowing energy orb inside
+      const orbGeo = new THREE.OctahedronGeometry(0.05, 0);
+      const orb = new THREE.Mesh(orbGeo, mats.goldGlow);
+      orb.position.y = 0.1;
+      lotusGroup.add(orb);
+      
+      const dLight = new THREE.PointLight(0xffaa00, 2.0, 3.0);
+      lotusGroup.add(dLight);
+      
+      scene.add(lotusGroup);
+
+      artifactEntity = {
+        mesh: lotusGroup, baseY: lotusGroup.position.y, time: 0,
+        update: function(dt) {
+          this.time += dt;
+          this.mesh.position.y = this.baseY + Math.sin(this.time * 2) * 0.05;
+          this.mesh.rotation.y += dt * 0.5;
+        }
+      };
+      
+      spawnSmokePoof(pedGroup.position);
+      playSound('gong');
+    }
+
+    // --- 4. SAMURAI JACK STYLE NINJAS ---
+    function spawnNinja() {
+      activeNinjas++;
+      const group = new THREE.Group();
+      
+      const angle = (Math.random() - 0.5) * Math.PI * 1.5;
+      const dist = 3.8; // Spawn further out
+      const groundPos = new THREE.Vector3(Math.sin(angle) * dist, 0, -Math.cos(angle) * dist);
+      
+      // -- 2001 Cartoon Network Proportions --
+      
+      // Huge Angular Head
+      const headGeo = new THREE.BoxGeometry(0.35, 0.25, 0.25);
+      const head = new THREE.Mesh(headGeo, mats.ninjaSuit);
+      head.position.y = 0.5; // Very low to the body
+      
+      // Sharp Triangular Eyes
+      const eyeShape = new THREE.Shape();
+      eyeShape.moveTo(0,0); eyeShape.lineTo(0.1, -0.05); eyeShape.lineTo(0, 0.05);
+      const eyeGeo = new THREE.ShapeGeometry(eyeShape);
+      
+      const eyeL = new THREE.Mesh(eyeGeo, mats.ninjaEye); eyeL.position.set(-0.15, 0.0, 0.126); 
+      const eyeR = new THREE.Mesh(eyeGeo, mats.ninjaEye); eyeR.position.set(0.15, 0.0, 0.126); eyeR.scale.x = -1; // Flip X
+      head.add(eyeL, eyeR);
+      
+      // Skin slit
+      const skinGeo = new THREE.PlaneGeometry(0.35, 0.08);
+      const skin = new THREE.Mesh(skinGeo, mats.ninjaSkin);
+      skin.position.set(0, -0.02, 0.125);
+      head.add(skin);
+      group.add(head);
+
+      // Tiny Sharp Torso
+      const torsoGeo = new THREE.CylinderGeometry(0.1, 0.02, 0.3, 4);
+      torsoGeo.rotateY(Math.PI/4); // Diamond shape
+      const torso = new THREE.Mesh(torsoGeo, mats.ninjaSuit);
+      torso.position.y = 0.2;
+      group.add(torso);
+      
+      // Big Red Belt
+      const beltGeo = new THREE.BoxGeometry(0.15, 0.05, 0.15);
+      const belt = new THREE.Mesh(beltGeo, mats.ninjaBelt);
+      belt.position.y = 0.18;
+      group.add(belt);
+
+      // Floating Blocky Fists (Rayman/CN style)
+      const fistGeo = new THREE.BoxGeometry(0.12, 0.12, 0.12);
+      const fistL = new THREE.Mesh(fistGeo, mats.ninjaSuit); fistL.position.set(-0.25, 0.2, 0);
+      const fistR = new THREE.Mesh(fistGeo, mats.ninjaSuit); fistR.position.set(0.25, 0.2, 0);
+      group.add(fistL, fistR);
+
+      // Start high up in the sky for dive bomb
+      const startPos = groundPos.clone().setY(5.0);
+      group.position.copy(startPos);
+      group.lookAt(groundPos.x, 0, groundPos.z); // Look straight down
+      scene.add(group);
+
+      const speed = 0.25 + (wave * 0.05);
+
+      entities.push({
+        type: 'ninja', mesh: group, state: 'DROPPING', t: 0, speed: speed,
+        groundPos: groundPos, targetPos: CONFIG.ARENA.artifactPos.clone().setY(0),
+        collider: new THREE.Sphere(group.position, 0.4), // Larger hitbox for big head
+        
+        fists: [fistL, fistR], head: head, timeOffset: Math.random() * 10,
+        
+        update: function(dt) {
+          this.timeOffset += dt * 15; // Fast animation speed
+
+          if (this.state === 'DROPPING') {
+            this.t += dt * 3.0; // Fall very fast
+            this.mesh.position.lerpVectors(startPos, this.groundPos, this.t);
+            this.collider.center.copy(this.mesh.position);
+            
+            if (this.t >= 1.0) {
+              this.t = 0;
+              this.state = 'RECOVERING';
+              this.mesh.position.copy(this.groundPos);
+              spawnSmokePoof(this.mesh.position); // Huge impact dust
+              playSound('poof');
+            }
+          }
+          else if (this.state === 'RECOVERING') {
+             // Crouch and look up
+             this.mesh.lookAt(this.targetPos);
+             this.t += dt * 5.0; // 0.2s pause
+             if(this.t >= 1.0) { this.t = 0; this.state = 'ATTACKING'; }
+          }
+          else if (this.state === 'ATTACKING') {
+            // Naruto Run Lean!
+            this.mesh.rotation.x = -0.6; // Lean forward
+            this.head.rotation.x = 0.6; // Look up to compensate
+            
+            // Fists trailing behind
+            this.fists[0].position.set(-0.25, 0.3, -0.3);
+            this.fists[1].position.set(0.25, 0.3, -0.3);
+
+            this.t += dt * this.speed;
+            
+            if (this.t >= 0.8) {
+              // Final 20% distance = FLIP JUMP
+              this.state = 'LEAPING';
+            } else {
+              // Ground run
+              this.mesh.position.lerpVectors(this.groundPos, this.targetPos, this.t / 0.8);
+              this.mesh.position.y = Math.abs(Math.sin(this.t * Math.PI * 10)) * 0.1; // Quick footstep bobs
+              this.collider.center.copy(this.mesh.position).setY(this.mesh.position.y + 0.3);
+            }
+          } 
+          else if (this.state === 'LEAPING') {
+            // Un-lean
+            this.mesh.rotation.x = 0; this.head.rotation.x = 0;
+            
+            this.t += dt * this.speed * 1.5; // Faster during leap
+            
+            // Front flip!
+            this.mesh.rotation.x = -(this.t - 0.8) * Math.PI * 10;
+            
+            // Arc onto pedestal
+            const leapProgress = (this.t - 0.8) / 0.2; // 0 to 1
+            const jumpStart = new THREE.Vector3().lerpVectors(this.groundPos, this.targetPos, 0.8);
+            this.mesh.position.lerpVectors(jumpStart, this.targetPos, leapProgress);
+            this.mesh.position.y = Math.sin(leapProgress * Math.PI) * 1.5; // high arc
+            
+            this.collider.center.copy(this.mesh.position).setY(this.mesh.position.y + 0.3);
+
+            if(this.t >= 1.0) this.stealArtifact();
+          }
+          else if (this.state === 'ESCAPING') {
+             this.mesh.rotation.x = 0; // Reset rotation
+             this.t += dt * this.speed * 1.5;
+             this.mesh.position.lerpVectors(this.targetPos, this.groundPos, this.t);
+             this.mesh.position.y = Math.sin(this.t * Math.PI) * 2.5;
+             artifactEntity.mesh.position.copy(this.mesh.position).setY(this.mesh.position.y + 0.8);
+             if(this.t >= 1.0) triggerGameOver();
+          }
+        },
+        
+        hit: function(vel) {
+          if (this.state === 'DEAD' || this.state === 'ESCAPING') return;
+          this.state = 'DEAD';
+          activeNinjas--;
+          
+          spawnSubstitutionLog(this.mesh.position, vel);
+          spawnSmokePoof(this.mesh.position);
+          
+          this.destroy();
+        },
+
+        stealArtifact: function() {
+          if (gameState !== GAME_STATES.DEFEND) return;
+          this.state = 'ESCAPING';
+          this.t = 0; 
+          gameState = GAME_STATES.GAMEOVER; 
+          showHeadsetHUDMessage("THE LOTUS IS STOLEN", true);
+          playSound('steal');
+        },
+
+        destroy: function() {
+          this.dead = true;
+          scene.remove(this.mesh);
+          if (this.state !== 'DEAD' && this.state !== 'ESCAPING') activeNinjas--; // Clean up counter
+        }
+      });
+    }
+
+    // ==========================================
+    // VFX & JUICE FACTORIES
+    // ==========================================
+    function spawnWindTrail(pos) {
+      const geo = new THREE.PlaneGeometry(0.12, 0.12);
+      const mesh = new THREE.Mesh(geo, mats.windSlash);
+      mesh.position.copy(pos); mesh.lookAt(camera.position);
+      scene.add(mesh);
+
+      entities.push({
+        type: 'vfx', mesh: mesh, life: 0.15, maxLife: 0.15,
+        update: function(dt) {
+          this.life -= dt;
+          const p = this.life / this.maxLife;
+          this.mesh.scale.setScalar(p);
+          this.mesh.material.opacity = p * 0.5;
+          if(this.life <= 0) this.destroy();
+        },
+        destroy: function() { this.dead = true; scene.remove(this.mesh); }
+      });
+    }
+
+    function spawnSmokePoof(pos) {
+      const count = 8; // More smoke for cartoon style
+      for(let i=0; i<count; i++) {
+        // High polygon sphere looks flatter and puffier with flatShading
+        const geo = new THREE.DodecahedronGeometry(0.2 + Math.random()*0.15); 
+        const mesh = new THREE.Mesh(geo, mats.smoke.clone());
+        
+        mesh.position.copy(pos);
+        mesh.position.add(new THREE.Vector3((Math.random()-0.5)*0.4, (Math.random()-0.5)*0.4, (Math.random()-0.5)*0.4));
+        scene.add(mesh);
+
+        const vel = new THREE.Vector3((Math.random()-0.5)*2.5, Math.random()*2.0, (Math.random()-0.5)*2.5);
+        
+        entities.push({
+          type: 'vfx', mesh: mesh, life: 0.5, maxLife: 0.5, vel: vel,
+          update: function(dt) {
+            this.mesh.position.addScaledVector(this.vel, dt);
+            this.vel.multiplyScalar(0.85); // Heavy drag for cartoon snap
+            this.life -= dt;
+            const p = this.life / this.maxLife;
+            this.mesh.scale.setScalar(1 + (1-p)*2.0); // Big expand
+            this.mesh.material.opacity = p;
+            if(this.life <= 0) this.destroy();
+          },
+          destroy: function() { this.dead = true; scene.remove(this.mesh); }
+        });
+      }
+    }
+
+    function spawnWoodSplinters(pos) {
+      const count = 12;
+      for(let i=0; i<count; i++) {
+        const geo = new THREE.BoxGeometry(0.04, 0.2, 0.04);
+        const mesh = new THREE.Mesh(geo, mats.wood);
+        mesh.position.copy(pos);
+        scene.add(mesh);
+
+        const vel = new THREE.Vector3((Math.random()-0.5)*8, Math.random()*6, (Math.random()-0.5)*8);
+        const rot = new THREE.Vector3(Math.random()*15, Math.random()*15, Math.random()*15);
+        
+        entities.push({
+          type: 'vfx', mesh: mesh, life: 0.6, vel: vel, rot: rot,
+          update: function(dt) {
+            this.vel.y += CONFIG.SHURIKEN.gravity * 1.5 * dt; // Heavy gravity
+            this.mesh.position.addScaledVector(this.vel, dt);
+            this.mesh.rotation.x += this.rot.x * dt;
+            this.mesh.rotation.y += this.rot.y * dt;
+            this.life -= dt;
+            this.mesh.scale.setScalar(Math.max(0, this.life/0.6));
+            if(this.life <= 0) this.destroy();
+          },
+          destroy: function() { this.dead = true; scene.remove(this.mesh); }
+        });
+      }
+    }
+
+    function spawnSubstitutionLog(pos, hitVel) {
+      const geo = new THREE.CylinderGeometry(0.15, 0.15, 0.6, 6);
+      geo.rotateX(Math.PI/2);
+      const mesh = new THREE.Mesh(geo, mats.wood);
+      mesh.position.copy(pos);
+      scene.add(mesh);
+      
+      const vel = hitVel.clone().multiplyScalar(0.15); // Inherit less velocity, mostly pop up
+      vel.y += 4.0; // High pop up
+      const rot = new THREE.Vector3(Math.random()*10, Math.random()*10, Math.random()*10);
+      
+      entities.push({
+        type: 'vfx', mesh: mesh, life: 1.5, vel: vel, rot: rot,
+        update: function(dt) {
+          this.vel.y += CONFIG.SHURIKEN.gravity * 1.2 * dt;
+          this.mesh.position.addScaledVector(this.vel, dt);
+          this.mesh.rotation.x += this.rot.x * dt;
+          this.mesh.rotation.y += this.rot.y * dt;
+          this.life -= dt;
+          if(this.life < 0.2) this.mesh.scale.setScalar(this.life/0.2);
+          if(this.life <= 0) this.destroy();
+        },
+        destroy: function() { this.dead = true; scene.remove(this.mesh); }
+      });
+    }
+
+    function spawnFloatingTextWorld(text, position, type='normal') {
+      const canvas = document.createElement('canvas');
+      canvas.width = 512; canvas.height = 256;
+      const ctx = canvas.getContext('2d');
+      
+      const isCrit = type === 'crit';
+      ctx.font = isCrit ? "900 80px Arial" : "900 60px Arial"; // Comic style font
+      ctx.textAlign = "center";
+      
+      let fillCol = '#ffffff';
+      if(type==='crit') fillCol = '#ffc107'; 
+      if(type==='bad') fillCol = '#d32f2f'; 
+      
+      ctx.fillStyle = fillCol;
+      ctx.shadowColor = '#000'; ctx.shadowBlur = 0; ctx.shadowOffsetX = 6; ctx.shadowOffsetY = 6; // Hard drop shadow
+      ctx.fillText(text, 256, 140);
+      ctx.lineWidth = 4; ctx.strokeStyle = '#000'; ctx.strokeText(text, 256, 140);
+
+      const mat = new THREE.SpriteMaterial({ map: new THREE.CanvasTexture(canvas), transparent: true });
+      const sprite = new THREE.Sprite(mat);
+      sprite.position.copy(position); sprite.position.y += 0.5;
+      sprite.scale.set(1.5, 0.75, 1);
+      scene.add(sprite);
+
+      entities.push({
+        type: 'vfx', mesh: sprite, life: 1.0, maxLife: 1.0,
+        update: function(dt) {
+          this.life -= dt;
+          this.mesh.position.y += dt * 1.5; // Fast rise
+          const p = this.life / this.maxLife;
+          
+          // Comic book pop scale
+          if(p > 0.8) this.mesh.scale.setScalar(1 + Math.sin((1-p)*5*Math.PI));
+          else this.mesh.scale.setScalar(1);
+          
+          if(p < 0.3) this.mesh.material.opacity = p / 0.3;
+          if(this.life <= 0) this.destroy();
+        },
+        destroy: function() { this.dead = true; scene.remove(this.mesh); }
+      });
+    }
+
+    // ==========================================
+    // AUDIO SYNTHESIS ENGINE 
+    // ==========================================
+    function initAudio() { if (!audioCtx && window.AudioContext) audioCtx = new AudioContext(); }
+
+    function playSound(type) {
+      if (!audioCtx) return;
+      if (audioCtx.state === 'suspended') audioCtx.resume();
+      
+      const osc = audioCtx.createOscillator(); 
+      const gain = audioCtx.createGain();
+      osc.connect(gain); gain.connect(audioCtx.destination);
+      const now = audioCtx.currentTime;
+
+      if (type === 'throw') {
+        osc.type = 'triangle'; osc.frequency.setValueAtTime(600, now); osc.frequency.exponentialRampToValueAtTime(100, now + 0.1);
+        gain.gain.setValueAtTime(0.2, now); gain.gain.exponentialRampToValueAtTime(0.01, now + 0.1);
+        osc.start(now); osc.stop(now + 0.1);
+      } 
+      else if (type === 'hit_wood') {
+        osc.type = 'square'; osc.frequency.setValueAtTime(100, now); osc.frequency.exponentialRampToValueAtTime(40, now + 0.05);
+        gain.gain.setValueAtTime(0.5, now); gain.gain.exponentialRampToValueAtTime(0.01, now + 0.1);
+        osc.start(now); osc.stop(now + 0.1);
+      }
+      else if (type === 'poof') {
+        // Ninja smoke poof (noise burst)
+        const noise = audioCtx.createBufferSource();
+        const buffer = audioCtx.createBuffer(1, audioCtx.sampleRate * 0.2, audioCtx.sampleRate);
+        const data = buffer.getChannelData(0);
+        for(let i=0; i<data.length; i++) data[i] = Math.random() * 2 - 1;
+        noise.buffer = buffer;
+        
+        const filter = audioCtx.createBiquadFilter();
+        filter.type = 'lowpass'; filter.frequency.setValueAtTime(800, now); filter.frequency.linearRampToValueAtTime(100, now + 0.2);
+        
+        const noiseGain = audioCtx.createGain();
+        noiseGain.gain.setValueAtTime(0.8, now); noiseGain.gain.exponentialRampToValueAtTime(0.01, now+0.2);
+        
+        noise.connect(filter); filter.connect(noiseGain); noiseGain.connect(audioCtx.destination);
+        noise.start(now);
+      }
+      else if (type === 'gong') {
+        osc.type = 'sine'; osc.frequency.setValueAtTime(120, now); osc.frequency.exponentialRampToValueAtTime(118, now+2.0);
+        const osc2 = audioCtx.createOscillator(); osc2.type = 'triangle'; osc2.frequency.setValueAtTime(300, now);
+        const gain2 = audioCtx.createGain(); gain2.gain.setValueAtTime(0.2, now); gain2.gain.exponentialRampToValueAtTime(0.01, now+1.0);
+        osc2.connect(gain2); gain2.connect(audioCtx.destination); osc2.start(now); osc2.stop(now+1.5);
+
+        gain.gain.setValueAtTime(0.8, now); gain.gain.exponentialRampToValueAtTime(0.01, now + 2.0);
+        osc.start(now); osc.stop(now + 2.0);
+      }
+    }
+
+    function triggerHaptics(controller, intensity, duration) {
+      if (controller.gamepad && controller.gamepad.hapticActuators && controller.gamepad.hapticActuators.length > 0) {
+        controller.gamepad.hapticActuators[0].pulse(intensity, duration);
+      }
+    }
+
+    // ==========================================
+    // LOGIC & RENDER LOOP
+    // ==========================================
+    function handleCollisions() {
+      const shurikens = entities.filter(e => e.type === 'shuriken' && !e.dead);
+      const targets = entities.filter(e => e.type === 'target' && !e.dead);
+      const ninjas = entities.filter(e => e.type === 'ninja' && (e.state === 'ATTACKING' || e.state === 'LEAPING') && !e.dead);
+
+      let uiNeedsUpdate = false;
+
+      for (let s of shurikens) {
+        let hit = false;
+
+        // Phase 1: Makiwara Targets
+        if (gameState === GAME_STATES.TUTORIAL) {
+          for (let t of targets) {
+            if (s.collider.intersectsSphere(t.collider)) {
+              s.destroy(); t.destroy(); hit = true;
+              
+              tutorialHits++;
+              playSound('hit_wood');
+              spawnWoodSplinters(t.mesh.position);
+              
+              if (tutorialHits >= CONFIG.TUTORIAL_HITS_REQUIRED) {
+                triggerPhaseDefend();
+              }
+              break;
+            }
+          }
+        }
+
+        // Phase 2: Shinobi
+        if (!hit && gameState === GAME_STATES.DEFEND) {
+          for (let n of ninjas) {
+            if (s.collider.intersectsSphere(n.collider)) {
+              s.destroy(); hit = true;
+              
+              combo++;
+              const isCrit = combo >= 3;
+              const points = Math.floor(CONFIG.SCORING.base * (1 + (combo - 1) * CONFIG.SCORING.comboMultiplier));
+              score += points;
+              uiNeedsUpdate = true;
+              
+              hitStopTimer = CONFIG.GAME_FEEL.hitStopDuration;
+              playSound('poof');
+              n.hit(s.velocity); 
+              
+              spawnFloatingTextWorld(isCrit ? `CRITICAL! +${points}` : `+${points}`, n.mesh.position, isCrit ? 'crit' : 'normal');
+              controllers.forEach(c => triggerHaptics(c, 1.0, 150));
+              break;
+            }
+          }
+        }
+      }
+
+      // Combo drop logic
+      for (let s of shurikens) {
+        if (s.mesh.position.y < -0.5 && s.life > 0.5) {
+            s.life = 0; 
+            if (combo > 0) {
+              combo = 0; uiNeedsUpdate = true;
+              spawnFloatingTextWorld("MISS", s.mesh.position, 'bad');
+            }
+        }
+      }
+      
+      if(uiNeedsUpdate) updateInWorldUI();
+    }
+
+    function updateWaveLogic(dt) {
+      if (gameState !== GAME_STATES.DEFEND) return;
+
+      if (ninjasToSpawn > 0) {
+        waveTimer += dt;
+        const spawnDelay = Math.max(0.6, 2.5 - (wave * 0.3)); 
+        if (waveTimer >= spawnDelay) {
+          spawnNinja();
+          ninjasToSpawn--;
+          waveTimer = 0;
+        }
+      } else if (activeNinjas === 0 && ninjasToSpawn === 0) {
+        gameState = GAME_STATES.TRANSITION;
+        showHeadsetHUDMessage(`WAVE ${wave} CLEARED`);
+        setTimeout(() => {
+           if(gameState !== GAME_STATES.GAMEOVER) {
+             gameState = GAME_STATES.DEFEND;
+             startWave(wave + 1);
+           }
+        }, 4000);
+      }
+    }
+
+    function render(time, frame) {
+      let dt = clock.getDelta();
+      
+      // Hit-stop Time Dilation
+      if (hitStopTimer > 0) { 
+         hitStopTimer -= dt; 
+         dt *= 0.05; 
+         if(renderer.xr.isPresenting) {
+            const shake = CONFIG.GAME_FEEL.cameraShake;
+            envGroup.position.set((Math.random()-0.5)*shake, (Math.random()-0.5)*shake, (Math.random()-0.5)*shake);
+         }
+      } else { 
+         dt = Math.min(dt, 0.05); 
+         envGroup.position.set(0,0,0); 
+      }
+
+      // 1. Update Input
+      controllers.forEach(controller => {
+        if (!controller.userData.history) return;
+        const pos = new THREE.Vector3(); controller.getWorldPosition(pos);
+        controller.userData.history.push({ pos: pos, time: performance.now() });
+        if (controller.userData.history.length > 5) controller.userData.history.shift();
+        if (controller.userData.holding) controller.userData.holding.rotateZ(dt * 3);
+      });
+
+      // 2. Process Entities
+      if(artifactEntity) artifactEntity.update(dt);
+      
+      for (let i = 0; i < entities.length; i++) {
+        if (!entities[i].dead && entities[i].update) entities[i].update(dt);
+      }
+
+      // 3. Logic Phases
+      handleCollisions();
+      updateWaveLogic(dt);
+
+      // 4. Garbage Collection
+      entities = entities.filter(e => !e.dead);
+
+      // 5. Draw
+      renderer.render(scene, camera);
+    }
+  </script>
+</body>
+</html>
